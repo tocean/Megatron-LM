@@ -621,6 +621,21 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             if args.log_timers_to_tensorboard:
                 writer.add_scalar('iteration-time',
                                   elapsed_time_per_iteration, iteration)
+        # add throughput and flops
+        seq_len = args.seq_length
+        hidden_size = args.hidden_size
+        num_layers = args.num_layers
+        vocab_size = args.padded_vocab_size
+        samples_per_sec = batch_size / elapsed_time_per_iteration
+
+        checkpoint_activations_factor = 4 if args.recompute_granularity else 3
+        # coefficient = 32 if args.glu_activation else 24
+        coefficient = 24
+        flops_per_iteration = (coefficient * checkpoint_activations_factor * batch_size * seq_len * num_layers * (
+                hidden_size ** 2)) * (1. + (seq_len / (6. * hidden_size)) + (
+                vocab_size / (16. * num_layers * hidden_size)))
+        tflops = flops_per_iteration / (elapsed_time_per_iteration * args.world_size * (10 ** 12))
+
         log_string = ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
         log_string += ' consumed samples: {:12d} |'.format(
@@ -648,6 +663,10 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             total_loss_dict[skipped_iters_key])
         log_string += ' number of nan iterations: {:3d} |'.format(
             total_loss_dict[nan_iters_key])
+
+        log_string += ' samples per second: {:.3f} |'.format(samples_per_sec)
+        log_string += ' TFLOPs: {:.2f} |'.format(tflops)
+
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
