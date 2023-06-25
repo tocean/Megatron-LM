@@ -1,5 +1,5 @@
 #! /bin/bash
-# sh debug.sh 1 0 8 8 1 4 127.0.0.1
+# sh gpt_3b.sh
 # PP=1 TP=4 BS=8
 # sh debug.sh <nnodes> <node rank> <gpus per node> <mini batch size> <PP> <TP> <ADDR>
 
