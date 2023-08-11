@@ -44,10 +44,14 @@ def clip_grad_norm_fp32(parameters, grads_for_norm,
 
     # Grads.
     grads = []
+    fp8_grads = []
     for param in parameters:
         if param.grad is not None:
-            assert param.grad.type() == 'torch.cuda.FloatTensor'
-            grads.append(param.grad.detach())
+            if torch.is_tensor(param):
+                assert param.grad.type() == 'torch.cuda.FloatTensor'
+                grads.append(param.grad.detach())
+            else:
+                fp8_grads.append(param.grad)
 
     # Norm parameters.
     max_norm = float(max_norm)
@@ -66,15 +70,24 @@ def clip_grad_norm_fp32(parameters, grads_for_norm,
 
     else:
         if norm_type == 2.0:
+            fp8_grads_for_norm = []
+            torch_grads_for_norm = []
+            for grad in grads_for_norm:
+                if torch.is_tensor(grad):
+                    torch_grads_for_norm.append(grad)
+                else:
+                    fp8_grads_for_norm.append(grad)
+
+
             dummy_overflow_buf = torch.cuda.IntTensor([0])
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
-            if grads_for_norm:
+            if torch_grads_for_norm:
                 grad_norm, _ = multi_tensor_applier(
                     amp_C.multi_tensor_l2norm,
                     dummy_overflow_buf,
-                    [grads_for_norm],
+                    [torch_grads_for_norm],
                     False # no per-parameter norm
                 )
             else:
@@ -83,6 +96,9 @@ def clip_grad_norm_fp32(parameters, grads_for_norm,
             # we need the pow(norm-type).
             total_norm = grad_norm ** norm_type
 
+            for grad in fp8_grads_for_norm:
+                grad_norm = torch.norm(grad.float(), norm_type)
+                total_norm += grad_norm ** norm_type
         else:
             for grad in grads_for_norm:
                 grad_norm = torch.norm(grad, norm_type)
