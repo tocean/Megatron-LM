@@ -408,7 +408,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             torch.distributed._all_gather_base(
                 all_gather_buffer,
                 input,
-                group=tp_group, name='fp8_linear_fwd_sp_input')
+                group=tp_group)
             total_input = all_gather_buffer
         else:
             total_input = input
@@ -434,8 +434,6 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         output_qtype = ctx.output_qtype
         metas = ctx.metas
         ograd_meta = metas['ograd']
-        wgrad_meta = metas['wgrad']
-
 
         use_bias = ctx.use_bias
 
@@ -450,7 +448,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             handle = torch.distributed._all_gather_base(
                 all_gather_buffer,
                 input,
-                group=get_tensor_model_parallel_group(), async_op=True, name='fp8_linear_bwd_sp_input')
+                group=get_tensor_model_parallel_group(), async_op=True)
 
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # gather is scheduled before the input gradient computation
@@ -478,7 +476,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         if ctx.async_grad_allreduce:
             # Asynchronous all-reduce
             handle = torch.distributed.all_reduce(
-                    grad_input, group=get_tensor_model_parallel_group(), async_op=True, name='fp8_linear_bwd_async_grad')
+                    grad_input, group=get_tensor_model_parallel_group(), async_op=True)
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # all-reduce is scheduled before the weight gradient computation
 
@@ -491,7 +489,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             # reduce_scatter
             handle = torch.distributed._reduce_scatter_base(sub_grad_input, grad_input,
                                                             group=get_tensor_model_parallel_group(),
-                                                            async_op=True, name='fp8_linear_bwd_sp_sub_grad')
+                                                            async_op=True)
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # reduce scatter is scheduled before the weight gradient computation
 

@@ -6,6 +6,7 @@
 from apex.optimizers import FusedAdam as Adam
 import math
 import torch
+import torch.nn.functional as F
 
 from megatron import get_args
 from megatron import get_timers
@@ -488,11 +489,19 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 # Typed param buffer.
                 param_buffer = torch.tensor(
                     storage,
-                    dtype = params_dtype,
+                    dtype = params_dtype if dtype != self.wgrad_dtype else self.wgrad_dtype,
                     device = grad_buffer.data.device)
                 param_buffer = param_buffer[:grad_buffer.numel_padded]
                 current_param_buffers[dtype] = param_buffer
             self.param_buffers.append(current_param_buffers)
+
+        # MS-AMP
+        for model_id, model in enumerate(self.models):
+            for dtype, param_map in model._grad_buffer_param_index_map.items():
+                for param, buf_range in param_map.items():
+                    param_buf = self.param_buffers[model_id][dtype]
+                    param_buf_shard = param_buf[buf_range[0]:buf_range[1]]
+                    assert param_buf_shard.numel() == buf_range[1] - buf_range[0], (dtype, param_buf.shape, buf_range, model._grad_buffers[torch.uint8].data.numel())
 
         # Update optimizer groups.
         # - Also, leverage state_dict() and load_state_dict() to
@@ -1020,7 +1029,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             pad = max_elems_per_rank - scale_invs.numel()
             scale_invs = F.pad(scale_invs, (0, pad)) 
             output_scale_invs = scale_invs.new_empty((max_elems_per_rank * data_parallel_world_size, ))
-            torch.distributed._all_gather_base(output_scale_invs, scale_invs, group=data_parallel_group, name='dist_opt_gather_model_params_scale_invs')
+            torch.distributed._all_gather_base(output_scale_invs, scale_invs, group=data_parallel_group)
             j = 0
             for i in range(data_parallel_world_size):
                 start = i * max_elems_per_rank
