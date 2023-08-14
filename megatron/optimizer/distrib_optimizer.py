@@ -471,6 +471,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                                                    self.model_param_gbuf_map,
                                                    self.opt_group_ranges)
 
+        # MS-AMP
+        for _, model in enumerate(self.models):
+            for p in model.parameters():
+                if not torch.is_tensor(p):
+                    p.cast_(self.weight_qtype)
+
         # Initialize param buffers.
         # - These are views on the DDP model's grad buffers, that share
         #   storage & have their own dtype. This is safe because the param
@@ -814,6 +820,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         [group_index]["params"][group_order]
                     optim_state = self.optimizer.state[main_param]
 
+                    # MS-AMP
+                    if isinstance(optim_state['exp_avg'], dict):
+                        optim_state['exp_avg'] = optim_state['exp_avg']["state"]
+                    if isinstance(optim_state['exp_avg_sq'], dict):
+                        optim_state['exp_avg_sq'] = optim_state['exp_avg_sq']["state"]
+
                     tensors = {
                         "param" : main_param,
                         **optim_state,
@@ -823,7 +835,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     gbuf_local_start = param_range_map["gbuf_local"].start
                     gbuf_local_end = param_range_map["gbuf_local"].end
                     for key in local_shards:
-                        tensors[key].data.copy_(
+                        if isinstance(tensors[key], ScalingTensor):
+                            tensors[key].value.data.view(-1).copy_(
+                            local_shards[key][gbuf_local_start:gbuf_local_end])
+                        else:
+                            tensors[key].data.view(-1).copy_(
                             local_shards[key][gbuf_local_start:gbuf_local_end])
 
 
