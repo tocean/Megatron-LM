@@ -7,7 +7,6 @@ import math
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
-from megatron import get_args
 from megatron.core import mpu
 from .module import MegatronModule
 
@@ -168,9 +167,8 @@ class DistributedDataParallel(DistributedDataParallelBase):
                         type_num_elements[dtype] + param.data.nelement(),
                     )
 
-            args = get_args()
             self._grad_buffer_num_params = [0 for _ in range(data_parallel_world_size)]
-            if args.msamp and len(fp8_params) > 0:
+            if len(fp8_params) > 0:
                 self._grad_buffer_param_index_map[wgrad_dtype] = {}
                 fp8_params_with_size = [(p, (-p.numel(), i % data_parallel_world_size)) for i, p in enumerate(fp8_params)]
                 fp8_params_with_size.sort(key=lambda e: e[1])
@@ -249,7 +247,6 @@ class DistributedDataParallel(DistributedDataParallelBase):
         def param_hook(*unused):
             # Add the gradient to the buffer.
             if param.grad is not None:
-                
                 param.main_grad.copy_((param.main_grad.to(param.grad.dtype) + \
                     param.grad).cast(wgrad_qtype, meta=param.main_grad.meta))
                 # Now we can deallocate grad memory.
