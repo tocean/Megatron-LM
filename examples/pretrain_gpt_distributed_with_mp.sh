@@ -46,8 +46,8 @@ GPT_ARGS="
     --clip-grad 1.0 \
     --fp16 \
     --use-flash-attn \
-    --msamp \
-    --no-gradient-accumulation-fusion
+    --no-gradient-accumulation-fusion \
+    --msamp
 "
 
 DATA_ARGS="
@@ -60,7 +60,7 @@ DATA_ARGS="
 
 OUTPUT_ARGS="
     --log-interval 100 \
-    --save-interval 200 \
+    --save-interval 10000 \
     --eval-interval 1000 \
     --eval-iters 10
 "
