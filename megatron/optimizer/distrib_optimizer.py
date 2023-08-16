@@ -696,10 +696,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     optim_state = self.optimizer.state[main_param]
 
                     # MS-AMP
-                    if isinstance(optim_state['exp_avg'], dict):
-                        optim_state['exp_avg'] = optim_state['exp_avg']["state"]
-                    if isinstance(optim_state['exp_avg_sq'], dict):
-                        optim_state['exp_avg_sq'] = optim_state['exp_avg_sq']["state"]
+                    # if isinstance(optim_state['exp_avg'], dict):
+                    #     optim_state['exp_avg'] = optim_state['exp_avg']["state"]
+                    # if isinstance(optim_state['exp_avg_sq'], dict):
+                    #     optim_state['exp_avg_sq'] = optim_state['exp_avg_sq']["state"]
 
                     tensors = {
                         "param" : main_param,
@@ -710,6 +710,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     gbuf_local_end = param_range_map["gbuf_local"].end
                     for key in local_shards:
                         # MS-AMP: Add view(-1) because the shape does not change in build_model_and_main_param_groups
+                        if isinstance(tensors[key], dict) and 'state' in tensors[key]:
+                            tensors[key] = tensors[key]['state']
                         if isinstance(tensors[key], ScalingTensor):
                             local_shards[key][gbuf_local_start:gbuf_local_end]\
                                 .data.copy_(tensors[key].value.view(-1).cpu())
@@ -762,7 +764,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
           buffers. (e.g., one buffer each for main_param, exp_avg, and
           exp_avg_sq).
         """
-
         # Data parallelism variables.
         data_parallel_world_size = mpu.get_data_parallel_world_size()
         data_parallel_rank = mpu.get_data_parallel_rank()
@@ -821,10 +822,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     optim_state = self.optimizer.state[main_param]
 
                     # MS-AMP
-                    if isinstance(optim_state['exp_avg'], dict):
-                        optim_state['exp_avg'] = optim_state['exp_avg']["state"]
-                    if isinstance(optim_state['exp_avg_sq'], dict):
-                        optim_state['exp_avg_sq'] = optim_state['exp_avg_sq']["state"]
+                    # if isinstance(optim_state['exp_avg'], dict):
+                    #     optim_state['exp_avg'] = optim_state['exp_avg']["state"]
+                    # if isinstance(optim_state['exp_avg_sq'], dict):
+                    #     optim_state['exp_avg_sq'] = optim_state['exp_avg_sq']["state"]
 
                     tensors = {
                         "param" : main_param,
@@ -835,6 +836,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     gbuf_local_start = param_range_map["gbuf_local"].start
                     gbuf_local_end = param_range_map["gbuf_local"].end
                     for key in local_shards:
+                        if isinstance(tensors[key], dict) and 'state' in tensors[key]:
+                            tensors[key] = tensors[key]['state']
                         if isinstance(tensors[key], ScalingTensor):
                             tensors[key].value.data.view(-1).copy_(
                             local_shards[key][gbuf_local_start:gbuf_local_end])
