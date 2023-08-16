@@ -12,10 +12,10 @@ NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-CHECKPOINT_PATH=<Specify path>
-VOCAB_FILE=<Specify path to file>/gpt2-vocab.json
-MERGE_FILE=<Specify path to file>/gpt2-merges.txt
-DATA_PATH=<Specify path and file prefix>_text_document
+CHECKPOINT_PATH=./checkpoints/gpt3_345_dist
+VOCAB_FILE=/hostroot/home/superbench/yuxiangyang/megatron-dev/gpt2-vocab.json
+MERGE_FILE=/hostroot/home/superbench/yuxiangyang/megatron-dev/gpt2-merges.txt
+DATA_PATH=/hostroot/home/superbench/yuxiangyang/megatron-dev/crawl-text/gpt_data/ccnews_meg_gpt_document
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -41,8 +41,14 @@ GPT_ARGS="
     --weight-decay 1e-2 \
     --lr-warmup-fraction .01 \
     --clip-grad 1.0 \
-    --fp16
+    --fp16 \
+    --use-flash-attn \
+    --no-gradient-accumulation-fusion \
+    --msamp
 "
+
+#   --msamp
+#   --no-gradient-accumulation-fusion
 
 DATA_ARGS="
     --data-path $DATA_PATH \
@@ -54,7 +60,7 @@ DATA_ARGS="
 
 OUTPUT_ARGS="
     --log-interval 100 \
-    --save-interval 10000 \
+    --save-interval 100 \
     --eval-interval 1000 \
     --eval-iters 10
 "
@@ -64,5 +70,4 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     $DATA_ARGS \
     $OUTPUT_ARGS \
     --distributed-backend nccl \
-    --save $CHECKPOINT_PATH \
-    --load $CHECKPOINT_PATH
+    --use-distributed-optimizer

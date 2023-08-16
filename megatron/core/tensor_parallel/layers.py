@@ -33,6 +33,12 @@ from .mappings import (
 from .random import get_cuda_rng_tracker
 from .utils import VocabUtility, divide, split_tensor_along_last_dim
 
+from megatron import get_args
+
+from msamp.common.dtype import Dtypes
+from msamp.common.tensor import ScalingTensor, ScalingMeta
+from msamp.operators.gemm import Gemm
+
 _grad_accum_fusion_available = True
 try:
     import fused_weight_gradient_mlp_cuda
@@ -353,6 +359,171 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         return grad_input, grad_weight, grad_bias, None, None, None
 
 
+class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
+    """See linear_with_grad_accumulation_and_async_allreduce"""
+
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input, weight, bias, gradient_accumulation_fusion,
+                async_grad_allreduce, sequence_parallel):
+        ctx.use_bias = bias is not None
+        ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
+        ctx.async_grad_allreduce = async_grad_allreduce
+        ctx.sequence_parallel = sequence_parallel
+
+        input_shape = input.shape
+        ctx.input_shape = input_shape
+        metas = weight._scaling_metas
+        ctx.metas = metas
+        input_meta = metas['input']
+        tp_group = get_tensor_model_parallel_group()
+
+        output_dtype = input.dtype
+        input = input.contiguous()
+
+        old_meta_group = input_meta.group
+        input_meta.group = tp_group
+        input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+        input_meta.group = old_meta_group
+
+        input_fp8.requires_grad = input.requires_grad
+        input = input_fp8.value
+
+        weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
+        weight_fp8.requires_grad = weight.requires_grad
+
+        # save tensors
+        ctx.input_fp8 = input_fp8
+        ctx.weight_fp8 = weight_fp8
+        ctx.weight = weight
+
+        dim_size = list(input.size())
+        if sequence_parallel:
+            assert input.dtype == torch.uint8
+            world_size = get_tensor_model_parallel_world_size()
+            dim_size[0] = dim_size[0] * world_size
+
+            all_gather_buffer = \
+                get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu")
+            torch.distributed._all_gather_base(
+                all_gather_buffer,
+                input,
+                group=tp_group)
+            total_input = all_gather_buffer
+        else:
+            total_input = input
+        ctx.dim_size = dim_size
+
+        assert total_input.dtype == torch.uint8
+        total_input_fp8 = ScalingTensor(total_input.view(-1, input_shape[-1]), input_fp8.meta)
+
+        output_qtype = Dtypes.dtype_to_qtype[output_dtype]
+        ctx.output_qtype = output_qtype
+        output = Gemm.fp8_gemm(weight_fp8, total_input_fp8, output_qtype, use_split_accumulator=False)
+        output = output.view(dim_size[:-1] + [-1])
+        if bias is not None:
+            output.add_(bias)
+        return output
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_output):
+        input_fp8 = ctx.input_fp8
+        weight_fp8 = ctx.weight_fp8
+        input = input_fp8.value
+        output_qtype = ctx.output_qtype
+        metas = ctx.metas
+        ograd_meta = metas['ograd']
+
+        use_bias = ctx.use_bias
+
+        if ctx.sequence_parallel:
+            assert input.dtype == torch.uint8
+            world_size = get_tensor_model_parallel_world_size()
+            dim_size = list(input.size())
+            dim_size[0] = dim_size[0] * world_size
+
+            all_gather_buffer = \
+                get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu")
+            handle = torch.distributed._all_gather_base(
+                all_gather_buffer,
+                input,
+                group=get_tensor_model_parallel_group(), async_op=True)
+
+            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+            # gather is scheduled before the input gradient computation
+            total_input = all_gather_buffer
+        else:
+            total_input = input
+
+        grad_output = grad_output.contiguous()
+        input_shape = ctx.input_shape
+        output_shape = grad_output.shape
+        if len(output_shape) != 2:
+            grad_output = grad_output.view(-1, output_shape[-1])
+        grad_output_fp8, grad_output_fp8_t = grad_output.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+
+        # grad_input
+        weight_fp8_t = weight_fp8.fp8_transpose()
+        grad_input = Gemm.fp8_gemm(weight_fp8_t, grad_output_fp8, output_qtype, use_split_accumulator=True)
+        grad_input = grad_input.view(ctx.dim_size)
+
+        if ctx.sequence_parallel:
+            handle.wait()
+
+        total_input_fp8 = ScalingTensor(total_input.view(-1, input_shape[-1]), input_fp8.meta)
+
+        if ctx.async_grad_allreduce:
+            # Asynchronous all-reduce
+            handle = torch.distributed.all_reduce(
+                    grad_input, group=get_tensor_model_parallel_group(), async_op=True)
+            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+            # all-reduce is scheduled before the weight gradient computation
+
+        if ctx.sequence_parallel:
+            assert not ctx.async_grad_allreduce
+            dim_size = list(input.size())
+            sub_grad_input = torch.empty(dim_size, dtype=grad_input.dtype,
+                                         device=torch.cuda.current_device(),
+                                         requires_grad=False)
+            # reduce_scatter
+            handle = torch.distributed._reduce_scatter_base(sub_grad_input, grad_input,
+                                                            group=get_tensor_model_parallel_group(),
+                                                            async_op=True)
+            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+            # reduce scatter is scheduled before the weight gradient computation
+
+
+        assert not ctx.gradient_accumulation_fusion, \
+            "gradient_accumulation_fusion not supported for FP8LinearWithGradAccumulationAndAsyncCommunication"
+        # MS-AMP: compute wgrad
+        total_input_fp8_t = total_input_fp8.fp8_transpose()
+        wgrad_qtype = output_qtype
+
+        grad_weight = Gemm.fp8_gemm(
+            total_input_fp8_t,
+            grad_output_fp8_t,
+            wgrad_qtype,
+            use_split_accumulator=True,
+        )
+
+        grad_bias = grad_output.sum(dim=0) if use_bias else None
+
+        # FP8 Weight Gradient
+        USING_FP8_WGRAD = True
+        if USING_FP8_WGRAD:
+            ctx.weight.backward_grad_update(grad_weight)
+            grad_weight = None
+
+        if ctx.sequence_parallel:
+            handle.wait()
+            return sub_grad_input, grad_weight, grad_bias, None, None, None
+
+        if ctx.async_grad_allreduce:
+            handle.wait()
+
+        return grad_input, grad_weight, grad_bias, None, None, None
+    
 def linear_with_grad_accumulation_and_async_allreduce(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -440,6 +611,9 @@ def linear_with_grad_accumulation_and_async_allreduce(
                 )
                 linear_with_grad_accumulation_and_async_allreduce.warned = True
 
+    if get_args().msamp:
+        if hasattr(weight, '_scaling_metas'):
+            return FP8LinearWithGradAccumulationAndAsyncCommunication.apply(*args)
     return LinearWithGradAccumulationAndAsyncCommunication.apply(*args)
 
 
@@ -513,14 +687,14 @@ class ColumnParallelLinear(torch.nn.Module):
         # Initialize weight.
         if not skip_weight_param_allocation:
             if config.use_cpu_initialization:
-                self.weight = Parameter(
+                _weight = Parameter(
                     torch.empty(
                         self.output_size_per_partition, self.input_size, dtype=config.params_dtype
                     )
                 )
                 if config.perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
-                        self.weight,
+                        _weight,
                         self.output_size,
                         self.input_size,
                         self.output_size_per_partition,
@@ -530,7 +704,7 @@ class ColumnParallelLinear(torch.nn.Module):
                         return_master_weight=keep_master_weight_for_test,
                     )
             else:
-                self.weight = Parameter(
+                _weight = Parameter(
                     torch.empty(
                         self.output_size_per_partition,
                         self.input_size,
@@ -540,10 +714,10 @@ class ColumnParallelLinear(torch.nn.Module):
                 )
                 if config.perform_initialization:
                     _initialize_affine_weight_gpu(
-                        self.weight, init_method, partition_dim=0, stride=stride
+                        _weight, init_method, partition_dim=0, stride=stride
                     )
         else:
-            self.weight = None
+            _weight = None
 
         if bias:
             if config.use_cpu_initialization:
@@ -597,6 +771,19 @@ class ColumnParallelLinear(torch.nn.Module):
             )
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+        
+        # MS-AMP: Create nn.Linear
+        self.linear = torch.nn.Linear(self.input_size, self.output_size_per_partition, bias=False, dtype=config.params_dtype)
+        assert self.linear.weight.shape == _weight.shape
+        self.linear.weight = _weight
+    
+    @property
+    def weight(self):
+        return self.linear.weight
+
+    @weight.setter
+    def weight(self, value):
+        raise RuntimeError('Do not set weight.')
 
     def forward(self, input_: torch.Tensor, weight: Optional[torch.Tensor] = None):
         """Forward of ColumnParallelLinear
@@ -722,14 +909,14 @@ class RowParallelLinear(torch.nn.Module):
         # we allocate the transpose.
         # Initialize weight.
         if config.use_cpu_initialization:
-            self.weight = Parameter(
+            _weight = Parameter(
                 torch.empty(
                     self.output_size, self.input_size_per_partition, dtype=config.params_dtype
                 )
             )
             if config.perform_initialization:
                 self.master_weight = _initialize_affine_weight_cpu(
-                    self.weight,
+                    _weight,
                     self.output_size,
                     self.input_size,
                     self.input_size_per_partition,
@@ -740,7 +927,7 @@ class RowParallelLinear(torch.nn.Module):
                     params_dtype=config.params_dtype,
                 )
         else:
-            self.weight = Parameter(
+            _weight = Parameter(
                 torch.empty(
                     self.output_size,
                     self.input_size_per_partition,
@@ -750,7 +937,7 @@ class RowParallelLinear(torch.nn.Module):
             )
             if config.perform_initialization:
                 _initialize_affine_weight_gpu(
-                    self.weight, init_method, partition_dim=1, stride=stride
+                    _weight, init_method, partition_dim=1, stride=stride
                 )
         if bias:
             if config.use_cpu_initialization:
@@ -773,6 +960,18 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('bias', None)
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+
+        self.linear = torch.nn.Linear(self.input_size_per_partition, self.output_size, bias=False, dtype=config.params_dtype)
+        assert self.linear.weight.shape == _weight.shape
+        self.linear.weight = _weight
+
+    @property
+    def weight(self):
+        return self.linear.weight
+
+    @weight.setter
+    def weight(self, value):
+        raise RuntimeError('Do not set weight.')
 
     def forward(self, input_):
         """Forward of RowParallelLinear

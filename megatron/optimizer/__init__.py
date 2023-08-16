@@ -9,6 +9,9 @@ from .distrib_optimizer import DistributedOptimizer
 from .grad_scaler import ConstantGradScaler, DynamicGradScaler
 from .optimizer import Float16OptimizerWithFloat16Params, FP32Optimizer
 
+import torch
+from msamp.optim import LBAdamW
+
 
 def get_param_groups(modules,
                      no_weight_decay_cond,
@@ -73,11 +76,22 @@ def get_megatron_optimizer(model,
                                     lr_mult)
 
     if args.optimizer == 'adam':
-        optimizer = Adam(param_groups,
-                         lr=args.lr,
-                         weight_decay=args.weight_decay,
-                         betas=(args.adam_beta1, args.adam_beta2),
-                         eps=args.adam_eps)
+        if args.msamp:
+            exp_avg_dtype, exp_avg_sq_dtype = torch.uint8, torch.float16
+            optimizer = LBAdamW(param_groups,
+                            lr=args.lr,
+                            weight_decay=args.weight_decay,
+                            betas=(args.adam_beta1, args.adam_beta2),
+                            eps=args.adam_eps,
+                            exp_avg_dtype=exp_avg_dtype, exp_avg_sq_dtype=exp_avg_sq_dtype,
+                            tensor_scale=True)
+        else:
+            optimizer = Adam(param_groups,
+                            lr=args.lr,
+                            weight_decay=args.weight_decay,
+                            betas=(args.adam_beta1, args.adam_beta2),
+                            eps=args.adam_eps)
+        
     elif args.optimizer == 'sgd':
         optimizer = SGD(param_groups,
                         lr=args.lr,

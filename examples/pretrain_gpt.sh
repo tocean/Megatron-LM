@@ -4,10 +4,10 @@
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-CHECKPOINT_PATH=<Specify path>
-VOCAB_FILE=<Specify path to file>/gpt2-vocab.json
-MERGE_FILE=<Specify path to file>/gpt2-merges.txt
-DATA_PATH=<Specify path and file prefix>_text_document
+CHECKPOINT_PATH=./checkpoints/gpt3_345m
+VOCAB_FILE=/hostroot/home/superbench/yuxiangyang/megatron-dev/gpt2-vocab.json
+MERGE_FILE=/hostroot/home/superbench/yuxiangyang/megatron-dev/gpt2-merges.txt
+DATA_PATH=/hostroot/home/superbench/yuxiangyang/megatron-dev/crawl-text/gpt_data/ccnews_meg_gpt_document
 
 GPT_ARGS="
     --num-layers 24 \
@@ -25,7 +25,9 @@ GPT_ARGS="
     --weight-decay 1e-2 \
     --lr-warmup-fraction .01 \
     --clip-grad 1.0 \
-    --fp16
+    --fp16 \
+    --use-flash-attn \
+    --msamp
 "
 
 DATA_ARGS="
