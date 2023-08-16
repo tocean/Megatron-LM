@@ -33,7 +33,7 @@ from megatron.initialize import initialize_megatron
 from megatron.initialize import write_args_to_tensorboard
 from megatron.initialize import set_jit_fusion_options
 from megatron.optimizer_param_scheduler import OptimizerParamScheduler
-from megatron.model import DistributedDataParallel as LocalDDP
+# from megatron.model import DistributedDataParallel as LocalDDP
 from megatron.utils import check_adlr_autoresume_termination
 from megatron.utils import unwrap_model
 from megatron.data.data_samplers import build_pretraining_data_loader
@@ -42,6 +42,10 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
 
+from msamp.nn import LinearReplacer
+from msamp.common.dtype import Dtypes
+from msamp.nn.state import model_state
+from msamp.megatron import FP8DistributedDataParallel as LocalDDP
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -295,6 +299,15 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         model = [Float16Module(model_module, args) for model_module in model]
+
+    if args.msamp:
+        print_rank_0("msamp is enabled")
+        model_state.use_fp8_ddp = True
+        for i in range(len(model)):
+            model[i] = LinearReplacer.replace(model[i], Dtypes.kfloat16,
+                                              src_rank=mpu.get_data_parallel_src_rank(),
+                                              group=mpu.get_data_parallel_group())
+            print_rank_0(model[i])
 
     if wrap_with_ddp:
         if args.DDP_impl == 'torch':

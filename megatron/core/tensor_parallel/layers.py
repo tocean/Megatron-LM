@@ -33,6 +33,8 @@ from .mappings import (
 from .random import get_cuda_rng_tracker
 from .utils import VocabUtility, divide, split_tensor_along_last_dim
 
+from msamp.megatron import FP8LinearWithGradAccumulationAndAsyncCommunication
+
 _grad_accum_fusion_available = True
 try:
     import fused_weight_gradient_mlp_cuda
@@ -439,7 +441,8 @@ def linear_with_grad_accumulation_and_async_allreduce(
                     "maximum speedup"
                 )
                 linear_with_grad_accumulation_and_async_allreduce.warned = True
-
+    if hasattr(weight, '_scaling_metas'):
+        return FP8LinearWithGradAccumulationAndAsyncCommunication.apply(*args)
     return LinearWithGradAccumulationAndAsyncCommunication.apply(*args)
 
 
@@ -513,14 +516,14 @@ class ColumnParallelLinear(torch.nn.Module):
         # Initialize weight.
         if not skip_weight_param_allocation:
             if config.use_cpu_initialization:
-                self.weight = Parameter(
+                _weight = Parameter(
                     torch.empty(
                         self.output_size_per_partition, self.input_size, dtype=config.params_dtype
                     )
                 )
                 if config.perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
-                        self.weight,
+                        _weight,
                         self.output_size,
                         self.input_size,
                         self.output_size_per_partition,
@@ -530,7 +533,7 @@ class ColumnParallelLinear(torch.nn.Module):
                         return_master_weight=keep_master_weight_for_test,
                     )
             else:
-                self.weight = Parameter(
+                _weight = Parameter(
                     torch.empty(
                         self.output_size_per_partition,
                         self.input_size,
@@ -540,10 +543,10 @@ class ColumnParallelLinear(torch.nn.Module):
                 )
                 if config.perform_initialization:
                     _initialize_affine_weight_gpu(
-                        self.weight, init_method, partition_dim=0, stride=stride
+                        _weight, init_method, partition_dim=0, stride=stride
                     )
         else:
-            self.weight = None
+            _weight = None
 
         if bias:
             if config.use_cpu_initialization:
@@ -597,6 +600,17 @@ class ColumnParallelLinear(torch.nn.Module):
             )
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+        self.linear = torch.nn.Linear(self.input_size, self.output_size_per_partition, bias=False, dtype=config.params_dtype)
+        assert self.linear.weight.shape == _weight.shape
+        self.linear.weight = _weight
+
+    @property
+    def weight(self):
+        return self.linear.weight
+
+    @weight.setter
+    def weight(self, value):
+        raise RuntimeError('Do not set weight.')
 
     def forward(self, input_: torch.Tensor, weight: Optional[torch.Tensor] = None):
         """Forward of ColumnParallelLinear
@@ -722,14 +736,14 @@ class RowParallelLinear(torch.nn.Module):
         # we allocate the transpose.
         # Initialize weight.
         if config.use_cpu_initialization:
-            self.weight = Parameter(
+            _weight = Parameter(
                 torch.empty(
                     self.output_size, self.input_size_per_partition, dtype=config.params_dtype
                 )
             )
             if config.perform_initialization:
                 self.master_weight = _initialize_affine_weight_cpu(
-                    self.weight,
+                    _weight,
                     self.output_size,
                     self.input_size,
                     self.input_size_per_partition,
@@ -740,7 +754,7 @@ class RowParallelLinear(torch.nn.Module):
                     params_dtype=config.params_dtype,
                 )
         else:
-            self.weight = Parameter(
+            _weight = Parameter(
                 torch.empty(
                     self.output_size,
                     self.input_size_per_partition,
@@ -750,7 +764,7 @@ class RowParallelLinear(torch.nn.Module):
             )
             if config.perform_initialization:
                 _initialize_affine_weight_gpu(
-                    self.weight, init_method, partition_dim=1, stride=stride
+                    _weight, init_method, partition_dim=1, stride=stride
                 )
         if bias:
             if config.use_cpu_initialization:
@@ -773,6 +787,18 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('bias', None)
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+
+        self.linear = torch.nn.Linear(self.input_size_per_partition, self.output_size, bias=False, dtype=config.params_dtype)
+        assert self.linear.weight.shape == _weight.shape
+        self.linear.weight = _weight
+
+    @property
+    def weight(self):
+        return self.linear.weight
+
+    @weight.setter
+    def weight(self, value):
+        raise RuntimeError('Do not set weight.')
 
     def forward(self, input_):
         """Forward of RowParallelLinear
