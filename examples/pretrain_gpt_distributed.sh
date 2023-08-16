@@ -43,9 +43,12 @@ GPT_ARGS="
     --clip-grad 1.0 \
     --fp16 \
     --use-flash-attn \
-    --msamp \
-    --no-gradient-accumulation-fusion
+    --no-gradient-accumulation-fusion \
+    --msamp
 "
+
+#   --msamp
+#   --no-gradient-accumulation-fusion
 
 DATA_ARGS="
     --data-path $DATA_PATH \
@@ -57,7 +60,7 @@ DATA_ARGS="
 
 OUTPUT_ARGS="
     --log-interval 100 \
-    --save-interval 1000 \
+    --save-interval 100 \
     --eval-interval 1000 \
     --eval-iters 10
 "
@@ -67,6 +70,4 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     $DATA_ARGS \
     $OUTPUT_ARGS \
     --distributed-backend nccl \
-    --use-distributed-optimizer \
-    --save $CHECKPOINT_PATH \
-    --load $CHECKPOINT_PATH
+    --use-distributed-optimizer
